@@ -11,7 +11,6 @@
            [com.amazonaws.auth DefaultAWSCredentialsProviderChain]
            [java.sql DriverManager SQLException]))
 
-
 (defn manifest [bucket files]
   {:entries (for [f files] {:url (str "s3://" bucket "/" f)
                             :mandatory true})})
@@ -64,13 +63,12 @@
             (when-not (.isClosed *current-connection*)
               (.close *current-connection*))))))
 
-
 (defn create-staging-table-stmt [target-table staging-table]
   (prepare-statement (format "CREATE TEMPORARY TABLE %s (LIKE %s INCLUDING DEFAULTS)"
                              staging-table
                              target-table)))
 
-(def credentials-chain (DefaultAWSCredentialsProviderChain. ))
+(def credentials-chain (DefaultAWSCredentialsProviderChain.))
 
 (defn copy-from-s3-stmt [table manifest-url {:keys [columns options] :as table-manifest}]
   (let [permission (if-let [iam-role (System/getenv "BLUESHIFT_S3_IAM_ROLE")]
@@ -88,7 +86,6 @@
 
 (defn truncate-table-stmt [target-table]
   (prepare-statement (format "truncate table %s" target-table)))
-
 
 (defn delete-in-query [target-table staging-table key]
   (format "DELETE FROM %s WHERE %s IN (SELECT %s FROM %s)" target-table key key staging-table))
@@ -113,9 +110,9 @@
 
 (defn staging-select-statement [{:keys [staging-select] :as table-manifest} staging-table]
   (cond
-   (string? staging-select)     (s/replace staging-select #"\{\{table\}\}" staging-table)
-   (= :distinct staging-select) (format "SELECT DISTINCT * FROM %s" staging-table)
-   :default                     (format "SELECT * FROM %s" staging-table)))
+    (string? staging-select)     (s/replace staging-select #"\{\{table\}\}" staging-table)
+    (= :distinct staging-select) (format "SELECT DISTINCT * FROM %s" staging-table)
+    :default                     (format "SELECT * FROM %s" staging-table)))
 
 (defn insert-from-staging-stmt [target-table staging-table table-manifest]
   (let [select-statement (staging-select-statement table-manifest staging-table)]
@@ -125,7 +122,11 @@
   (let [join-columns (s/join " AND " (map #(str "s." % " = t." %) keys))
         where-clauses (s/join " AND " (map #(str "t." % " IS NULL") keys))]
     (prepare-statement (format "INSERT INTO %s SELECT s.* FROM %s s LEFT JOIN %s t ON %s WHERE %s"
-      target-table staging-table target-table join-columns where-clauses))))
+                               target-table staging-table target-table join-columns where-clauses))))
+
+(defn add-from-staging-stmt [target-table staging-table]
+  (prepare-statement (format "INSERT INTO %s SELECT s.* FROM %s s"
+                             target-table staging-table)))
 
 (defn drop-table-stmt [table]
   (prepare-statement (format "DROP TABLE %s" table)))
@@ -175,36 +176,51 @@
                                                      :millis    timeout-millis})))
               :else (recur (rest statements)))))))
 
-(defn merge-table [redshift-manifest-url {:keys [table jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
-  (let [staging-table (str table "_staging")]
+(defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))
+        staging-table (str table "_staging")]
     (mark! redshift-imports)
     (with-connection jdbc-url
       (execute execute-opts
-               (create-staging-table-stmt table staging-table)
+               (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
-               (delete-target-stmt table staging-table pk-columns)
-               (insert-from-staging-stmt table staging-table table-manifest)
+               (delete-target-stmt target-table staging-table pk-columns)
+               (insert-from-staging-stmt target-table staging-table table-manifest)
                (drop-table-stmt staging-table)))))
 
-(defn replace-table [redshift-manifest-url {:keys [table jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
-  (mark! redshift-imports)
-  (with-connection jdbc-url
-    (execute execute-opts
-             (truncate-table-stmt table)
-             (copy-from-s3-stmt table redshift-manifest-url table-manifest))))
-
-(defn append-table [redshift-manifest-url {:keys [table jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
-  (let [staging-table (str table "_staging")]
+(defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))]
     (mark! redshift-imports)
     (with-connection jdbc-url
       (execute execute-opts
-               (create-staging-table-stmt table staging-table)
+               (truncate-table-stmt target-table)
+               (copy-from-s3-stmt target-table redshift-manifest-url table-manifest)))))
+
+(defn append-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))
+        staging-table (str table "_staging")]
+    (mark! redshift-imports)
+    (with-connection jdbc-url
+      (execute execute-opts
+               (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
-               (append-from-staging-stmt table staging-table pk-columns)
+               (append-from-staging-stmt target-table staging-table pk-columns)
+               (drop-table-stmt staging-table)))))
+
+(defn add-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))
+        staging-table (str table "_staging")]
+    (mark! redshift-imports)
+    (with-connection jdbc-url
+      (execute execute-opts
+               (create-staging-table-stmt target-table staging-table)
+               (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
+               (add-from-staging-stmt target-table staging-table)
                (drop-table-stmt staging-table)))))
 
 (defn load-table [redshift-manifest-url {strategy :strategy :as table-manifest}]
   (case (keyword strategy)
     :merge (merge-table redshift-manifest-url table-manifest)
     :replace (replace-table redshift-manifest-url table-manifest)
+    :add (add-table redshift-manifest-url table-manifest)
     :append (append-table redshift-manifest-url table-manifest)))
