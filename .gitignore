@@ -10,3 +10,6 @@ pom.xml.asc
 /etc/config.edn
 /etc/logback.xml
 resources/
+.DS_Store
+.clj-kondo
+.lsp
