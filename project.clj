@@ -1,4 +1,4 @@
-(defproject blueshift "0.1.0-SNAPSHOT"
+(defproject blueshift "0.1.1-SNAPSHOT"
   :description "Automate importing S3 data into Amazon Redshift"
   :url "https://github.com/uswitch/blueshift"
   :license {:name "Eclipse Public License"
@@ -30,6 +30,21 @@
   ;; https://www.deps.co/blog/how-to-upgrade-clojure-projects-to-use-java-11/
   :managed-dependencies [[org.clojure/core.rrb-vector "0.1.1"]
                          [org.flatland/ordered "1.5.7"]]
+
+  :release-tasks [["vcs" "assert-committed"]
+                  ["change" "version"
+                   "leiningen.release/bump-version" "release"]
+                  ["vcs" "commit"]
+                  ["vcs" "tag" "--no-sign"]
+                  ["deploy"]]
+
+  :repositories ^:replace [["snapshots" {:url "https://tradeswell.jfrog.io/artifactory/tw-maven-snapshots-only"
+                                         :username [:env/jfrog_user :gpg]
+                                         :password [:env/jfrog_access_token :gpg]}]
+                           ["releases" {:url "https://tradeswell.jfrog.io/artifactory/tw-maven"
+                                        :username [:env/jfrog_user :gpg]
+                                        :password [:env/jfrog_access_token :gpg]
+                                        :sign-releases false}]]
 
   :profiles {:dev {:dependencies [[org.slf4j/slf4j-simple "1.7.30"]
                                   [org.clojure/tools.namespace "1.0.0"]]

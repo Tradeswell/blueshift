@@ -20,6 +20,7 @@
   (s3/delete-object bucket key))
 
 (def ManifestSchema {:table          s/Str
+                     :schema         (s/maybe s/Str)
                      :pk-columns     [s/Str]
                      :columns        [s/Str]
                      :jdbc-url       s/Str
