@@ -1,4 +1,4 @@
-(defproject blueshift "0.1.0-SNAPSHOT"
+(defproject blueshift "0.1.1-SNAPSHOT"
   :description "Automate importing S3 data into Amazon Redshift"
   :url "https://github.com/uswitch/blueshift"
   :license {:name "Eclipse Public License"
@@ -38,7 +38,7 @@
                   ["vcs" "tag" "--no-sign"]
                   ["deploy"]]
 
-  :repositories ^:replace [["snapshots" {:url "https://tradeswell.jfrog.io/artifactory/tw-maven"
+  :repositories ^:replace [["snapshots" {:url "https://tradeswell.jfrog.io/artifactory/tw-maven-snapshots-only"
                                          :username [:env/jfrog_user :gpg]
                                          :password [:env/jfrog_access_token :gpg]}]
                            ["releases" {:url "https://tradeswell.jfrog.io/artifactory/tw-maven"
