@@ -133,6 +133,8 @@
            (if-let [m (ex-data e)]
              (error e "Failed to load files to table" (:table table-manifest) ": " (pr-str m))
              (error e "Failed to load files to table" (:table table-manifest) "from manifest" url))
+           (delete-object bucket key)
+           (dec! importing-files (count files))
            {:state :scan :pause? true}))))
 
 (defn- step-delete
