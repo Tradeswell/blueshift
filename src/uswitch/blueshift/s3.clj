@@ -27,7 +27,8 @@
                      :strategy       s/Str
                      :options        s/Any
                      :staging-select (s/maybe (s/either s/Str s/Keyword))
-                     :data-pattern   s/Regex})
+                     :data-pattern   s/Regex
+                     :execute-opts s/Any})
 
 (defn validate [manifest]
   (when-let [error-info (s/check ManifestSchema manifest)]
