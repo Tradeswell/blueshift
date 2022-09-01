@@ -5,7 +5,8 @@
             [clojure.string :as s]
             [clojure.core.async :refer (chan <!! >!! close! thread timeout alts!!)]
             [metrics.meters :refer (mark! meter)]
-            [metrics.counters :refer (inc! dec! counter)])
+            [metrics.counters :refer (inc! dec! counter)]
+            [clostache.parser :as clo])
   (:import [java.util UUID]
            [java.io ByteArrayInputStream]
            [com.amazonaws.auth DefaultAWSCredentialsProviderChain]
@@ -159,7 +160,7 @@
 (defn execute
   "Executes statements in the order specified. Will throw an exception if the statement
    fails or the timeout is triggered."
-  [{:keys [timeout-millis] :or {timeout-millis (* 1000 60 5)}} & statements]
+  [{:keys [timeout-millis] :or {timeout-millis (* 1000 60 60)}} & statements]
   (loop [statements statements]
     (when-let [statement (first statements)]
       (let [result-ch (thread (execute* statement timeout-millis))
@@ -218,9 +219,18 @@
                (add-from-staging-stmt target-table staging-table)
                (drop-table-stmt staging-table)))))
 
-(defn load-table [redshift-manifest-url {strategy :strategy :as table-manifest}]
-  (case (keyword strategy)
-    :merge (merge-table redshift-manifest-url table-manifest)
-    :replace (replace-table redshift-manifest-url table-manifest)
-    :add (add-table redshift-manifest-url table-manifest)
-    :append (append-table redshift-manifest-url table-manifest)))
+(defn replace-with-env-vars
+  "Replaces any string with {{ENV_VARIABLE_NAME}}s in them with the value from the environment"
+  [input-str]
+  (let [env-map (into {} (map (fn [[k v]] {(keyword k) v}) (System/getenv)))]
+    (clo/render input-str env-map)))
+
+(defn load-table
+  "kicks off any loads based on :strategy, also will replace any {{ENV_VAR}}s found in :table :schema or :jdbc-url with the values from those env vars"
+  [redshift-manifest-url {strategy :strategy :as table-manifest}]
+  (let [env-table-manifest (reduce (fn [m k] (update m k (fn [v] (replace-with-env-vars v))) ) table-manifest [:table :schema :jdbc-url])]
+    (case (keyword strategy)
+      :merge (merge-table redshift-manifest-url env-table-manifest)
+      :replace (replace-table redshift-manifest-url env-table-manifest)
+      :add (add-table redshift-manifest-url env-table-manifest)
+      :append (append-table redshift-manifest-url env-table-manifest))))

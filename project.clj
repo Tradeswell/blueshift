@@ -1,4 +1,4 @@
-(defproject blueshift "0.1.3"
+(defproject blueshift "0.1.6-SNAPSHOT"
   :description "Automate importing S3 data into Amazon Redshift"
   :url "https://github.com/uswitch/blueshift"
   :license {:name "Eclipse Public License"
@@ -25,6 +25,7 @@
                  [com.sun.xml.bind/jaxb-core "2.3.0.1"]
                  [com.sun.xml.bind/jaxb-impl "2.3.2"]
                  [javax.activation/activation "1.1.1"]
+                 [de.ubercode.clostache/clostache "1.4.0"]
                  ]
   ;; deal with java 11
   ;; https://www.deps.co/blog/how-to-upgrade-clojure-projects-to-use-java-11/
