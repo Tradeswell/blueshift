@@ -1,6 +1,12 @@
-{:s3 {:credentials   {:access-key ""
-                      :secret-key ""}
-      :bucket        "blueshift-data"
-      :key-pattern   ".*"
+{:s3 {:bucket "blueshift-data"
+      :credentials {:access-key "" :secret-key ""}
+      :key-pattern ".*"
       :poll-interval {:seconds 30}}
+ :status-db {:dbname "{{&STATUS_PGDATABASE}}"
+             :host "{{&STATUS_PGHOST}}"
+             :password "{{&STATUS_PGPASSWORD}}"
+             :port "{{&STATUS_PGPORT}}"
+             :schema "{{&STATUS_SCHEMA}}"
+             :table "{{&STATUS_TABLE}}"
+             :user "{{&STATUS_PGUSER}}"}
  :telemetry {:reporters [uswitch.blueshift.telemetry/log-metrics-reporter]}}

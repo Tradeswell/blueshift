@@ -6,7 +6,7 @@
             [clojure.core.async :refer (chan <!! >!! close! thread timeout alts!!)]
             [metrics.meters :refer (mark! meter)]
             [metrics.counters :refer (inc! dec! counter)]
-            [clostache.parser :as clo])
+            [uswitch.blueshift.util :as util])
   (:import [java.util UUID]
            [java.io ByteArrayInputStream]
            [com.amazonaws.auth DefaultAWSCredentialsProviderChain]
@@ -34,8 +34,8 @@
 ;; pgsql driver isn't loaded automatically from classpath
 (Class/forName "org.postgresql.Driver")
 
-(defn connection [jdbc-url]
-  (doto (DriverManager/getConnection jdbc-url)
+(defn connection [jdbc-url username password]
+  (doto (DriverManager/getConnection jdbc-url username password)
     (.setAutoCommit false)))
 
 (def ^{:dynamic true} *current-connection* nil)
@@ -46,8 +46,8 @@
 
 (def open-connections (counter [(str *ns*) "redshift-connections" "open-connections"]))
 
-(defmacro with-connection [jdbc-url & body]
-  `(binding [*current-connection* (connection ~jdbc-url)]
+(defmacro with-connection [jdbc-url username password & body]
+  `(binding [*current-connection* (connection ~jdbc-url ~username ~password)]
      (inc! open-connections)
      (try (let [res# ~@body]
             (debug "COMMIT")
@@ -177,11 +177,11 @@
                                                      :millis    timeout-millis})))
               :else (recur (rest statements)))))))
 
-(defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+(defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")]
     (mark! redshift-imports)
-    (with-connection jdbc-url
+    (with-connection jdbc-url username password
       (execute execute-opts
                (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
@@ -189,46 +189,40 @@
                (insert-from-staging-stmt target-table staging-table table-manifest)
                (drop-table-stmt staging-table)))))
 
-(defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+(defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))]
     (mark! redshift-imports)
-    (with-connection jdbc-url
+    (with-connection jdbc-url username password
       (execute execute-opts
                (truncate-table-stmt target-table)
                (copy-from-s3-stmt target-table redshift-manifest-url table-manifest)))))
 
-(defn append-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+(defn append-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")]
     (mark! redshift-imports)
-    (with-connection jdbc-url
+    (with-connection jdbc-url username password
       (execute execute-opts
                (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
                (append-from-staging-stmt target-table staging-table pk-columns)
                (drop-table-stmt staging-table)))))
 
-(defn add-table [redshift-manifest-url {:keys [table schema jdbc-url pk-columns strategy execute-opts] :as table-manifest}]
+(defn add-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")]
     (mark! redshift-imports)
-    (with-connection jdbc-url
+    (with-connection jdbc-url username password
       (execute execute-opts
                (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
                (add-from-staging-stmt target-table staging-table)
                (drop-table-stmt staging-table)))))
 
-(defn replace-with-env-vars
-  "Replaces any string with {{ENV_VARIABLE_NAME}}s in them with the value from the environment"
-  [input-str]
-  (let [env-map (into {} (map (fn [[k v]] {(keyword k) v}) (System/getenv)))]
-    (clo/render input-str env-map)))
-
 (defn load-table
   "kicks off any loads based on :strategy, also will replace any {{ENV_VAR}}s found in :table :schema or :jdbc-url with the values from those env vars"
   [redshift-manifest-url {strategy :strategy :as table-manifest}]
-  (let [env-table-manifest (reduce (fn [m k] (update m k (fn [v] (replace-with-env-vars v))) ) table-manifest [:table :schema :jdbc-url])]
+  (let [env-table-manifest (reduce (fn [m k] (update m k (fn [v] (util/replace-with-env-vars v))) ) table-manifest [:table :schema :jdbc-url :username :password])]
     (case (keyword strategy)
       :merge (merge-table redshift-manifest-url env-table-manifest)
       :replace (replace-table redshift-manifest-url env-table-manifest)
