@@ -9,11 +9,12 @@
             [schema.core :as s]
             [metrics.counters :refer (counter inc! dec!)]
             [metrics.timers :refer (timer time!)]
-            [uswitch.blueshift.redshift :as redshift])
+            [uswitch.blueshift.redshift :as redshift]
+            [uswitch.blueshift.sql :as sql])
   (:import [java.io PushbackReader InputStreamReader]
            [org.apache.http.conn ConnectionPoolTimeoutException]))
 
-(defrecord Manifest [table pk-columns columns jdbc-url options data-pattern strategy staging-select])
+(defrecord Manifest [table pk-columns columns jdbc-url username password add-status options data-pattern strategy staging-select])
 
 (defn delete-object
   [bucket key]
@@ -24,6 +25,9 @@
                      :pk-columns     [s/Str]
                      :columns        [s/Str]
                      :jdbc-url       s/Str
+                     :username       s/Str
+                     :password       s/Str
+                     :add-status     (s/maybe s/Bool)
                      :strategy       s/Str
                      :options        s/Any
                      :staging-select (s/maybe (s/either s/Str s/Keyword))
@@ -31,6 +35,7 @@
 
 (defn validate [manifest]
   (when-let [error-info (s/check ManifestSchema manifest)]
+    (error "Error validating: " manifest)
     (throw (ex-info "Invalid manifest. Check map for more details." error-info))))
 
 (defn list-all-objects
@@ -113,12 +118,16 @@
   (let [redshift-manifest  (redshift/manifest bucket files)
         {:keys [key url]}  (redshift/put-manifest bucket redshift-manifest)]
     (info "Importing" (count files) "data files to table" (:table table-manifest) "from manifest" url)
+    (when (:add-status table-manifest)
+      (sql/update-files-status files "processing"))
     (debug "Importing Redshift Manifest" redshift-manifest)
     (inc! importing-files (count files))
     (try (time! import-timer
                 (redshift/load-table url table-manifest))
          (info "Successfully imported" (count files) "files")
          (delete-object bucket key)
+         (when (:add-status table-manifest)
+           (sql/update-files-status files "upserted"))
          (dec! importing-files (count files))
          {:state :delete
           :files files}
@@ -126,6 +135,8 @@
            (error e "Error loading into" (:table table-manifest))
            (error (:table table-manifest) "Redshift manifest content:" redshift-manifest)
            (delete-object bucket key)
+           (when (:add-status table-manifest)
+             (sql/update-files-status files "failed"))
            (dec! importing-files (count files))
            {:state :scan
             :pause? true})
@@ -134,27 +145,28 @@
              (error e "Failed to load files to table" (:table table-manifest) ": " (pr-str m))
              (error e "Failed to load files to table" (:table table-manifest) "from manifest" url))
            (delete-object bucket key)
+           (when (:add-status table-manifest)
+             (sql/update-files-status files "failed"))
            (dec! importing-files (count files))
            {:state :scan :pause? true}))))
 
 (defn- step-delete
   [bucket files]
-  (do
-    (doseq [key files]
-      (info "Deleting" (str "s3://" bucket "/" key))
-      (try
-        (delete-object bucket key)
-        (catch Exception e
-          (warn "Couldn't delete" key "  - ignoring"))))
-    {:state :scan, :pause? true}))
+  (doseq [key files]
+    (info "Deleting" (str "s3://" bucket "/" key))
+    (try
+      (delete-object bucket key)
+      (catch Exception e
+        (warn "Couldn't delete" key "  - ignoring"))))
+  {:state :scan, :pause? true})
 
 (defn- progress
   [{:keys [state] :as world}
    {:keys [bucket directory] :as configuration}]
   (case state
-    :scan   (step-scan   bucket directory )
-    :load   (step-load   bucket           (:table-manifest world) (:files world))
-    :delete (step-delete bucket           (:files world))))
+    :scan   (step-scan   bucket directory)
+    :load   (step-load   bucket (:table-manifest world) (:files world))
+    :delete (step-delete bucket (:files world))))
 
 (defrecord KeyWatcher [bucket directory
                        poll-interval-seconds
@@ -165,26 +177,25 @@
     (let [control-ch    (chan)
           configuration {:bucket bucket :directory directory}]
       (thread
-       (loop [timer (timeout (*
-                              (+ poll-interval-seconds
-                                 (int (* (rand) (float poll-interval-random-seconds))))
-                              1000))
-              world {:state :scan}]
-         (let [next-world (progress world configuration)]
-           (if (:pause? next-world)
-             (let [[_ c] (alts!! [control-ch timer])]
-               (when (not= c control-ch)
-                 (let [t (*
-                          (+ poll-interval-seconds
-                             (int (* (rand) (float poll-interval-random-seconds))))
-                          1000)]
-                   (recur (timeout t) next-world))))
-             (recur timer next-world)))))
+        (loop [timer (timeout (*
+                               (+ poll-interval-seconds
+                                  (int (* (rand) (float poll-interval-random-seconds))))
+                               1000))
+               world {:state :scan}]
+          (let [next-world (progress world configuration)]
+            (if (:pause? next-world)
+              (let [[_ c] (alts!! [control-ch timer])]
+                (when (not= c control-ch)
+                  (let [t (*
+                           (+ poll-interval-seconds
+                              (int (* (rand) (float poll-interval-random-seconds))))
+                           1000)]
+                    (recur (timeout t) next-world))))
+              (recur timer next-world)))))
       (assoc this :watcher-control-ch control-ch)))
   (stop [this]
     (info "Stopping KeyWatcher for" (str bucket "/" directory))
     (close-channels this :watcher-control-ch)))
-
 
 (defn spawn-key-watcher! [bucket directory
                           poll-interval-seconds poll-interval-random-seconds]
