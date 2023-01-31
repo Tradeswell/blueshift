@@ -1,5 +1,8 @@
 (ns uswitch.blueshift.s3
-  (:require [com.stuartsierra.component :refer (Lifecycle system-map using start stop)]
+  (:require [cheshire.core :as json]
+            [cheshire.generate :refer [add-encoder encode-str]]
+            [com.stuartsierra.component :refer (Lifecycle system-map using start stop)]
+            [clojure.string :as str]
             [clojure.tools.logging :refer (info error warn debug errorf)]
             [amazonica.aws.s3 :as s3]
             [clojure.set :refer (difference)]
@@ -14,11 +17,22 @@
   (:import [java.io PushbackReader InputStreamReader]
            [org.apache.http.conn ConnectionPoolTimeoutException]))
 
+(add-encoder java.time.Instant encode-str)
+
 (defrecord Manifest [table pk-columns columns jdbc-url username password add-status options data-pattern strategy staging-select])
 
 (defn delete-object
   [bucket key]
   (s3/delete-object bucket key))
+
+(defn copy-object
+  [src-bucket src-key dest-bucket dest-key]
+  (s3/copy-object src-bucket src-key dest-bucket dest-key))
+
+(defn move-object
+  [src-bucket src-key dest-bucket dest-key]
+  (s3/copy-object src-bucket src-key dest-bucket dest-key)
+  (delete-object src-bucket src-key))
 
 (def ManifestSchema {:table          s/Str
                      :schema         (s/maybe s/Str)
@@ -148,7 +162,9 @@
            (when (:add-status table-manifest)
              (sql/update-files-status files "failed"))
            (dec! importing-files (count files))
-           {:state :scan :pause? true}))))
+           (if (and (ex-data e) (str/includes? (ex-data e) "stl_load_errors"))
+             {:state :stl-load-error :table-manifest table-manifest :files files}
+             {:state :scan :pause? true})))))
 
 (defn- step-delete
   [bucket files]
@@ -160,13 +176,35 @@
         (warn "Couldn't delete" key "  - ignoring"))))
   {:state :scan, :pause? true})
 
+(defn- step-stl-load-error
+  [bucket table-manifest files]
+  (info "Processing stl-load-error")
+  (let [bucket-files (mapv #(str "s3://" bucket "/" %) files)
+        stl-errors (redshift/get-stl-errors table-manifest bucket-files)]
+    (doseq [err stl-errors]
+      (let [file (:filename err)
+            key (str/replace-first file (str "s3://" bucket "/") "")
+            date-str (.format (java.text.SimpleDateFormat. "yyyy-MM-dd") (new java.util.Date))
+            dest-key (str "errors/" date-str (subs file (str/last-index-of file "/")))
+            existing-files (list-all-objects {:bucket-name bucket :prefix key})]
+        (if (seq existing-files)
+          (do (error "Found stl-load-error:" (json/generate-string err))
+              (info "Moving error file to " (str "s3://" bucket "/" dest-key))
+              (try
+                (move-object bucket key bucket dest-key)
+                (catch Exception e
+                  (warn e "Couldn't move" key "  - ignoring"))))
+          (info "Did not find an s3 file for " file "so we are skipping this.")))))
+  {:state :scan, :pause? true})
+
 (defn- progress
   [{:keys [state] :as world}
    {:keys [bucket directory] :as configuration}]
   (case state
     :scan   (step-scan   bucket directory)
     :load   (step-load   bucket (:table-manifest world) (:files world))
-    :delete (step-delete bucket (:files world))))
+    :delete (step-delete bucket (:files world))
+    :stl-load-error (step-stl-load-error bucket (:table-manifest world) (:files world))))
 
 (defrecord KeyWatcher [bucket directory
                        poll-interval-seconds
