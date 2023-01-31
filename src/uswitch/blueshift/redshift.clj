@@ -41,8 +41,9 @@
 (def ^{:dynamic true} *current-connection* nil)
 
 (defn prepare-statement
-  [sql]
-  (.prepareStatement *current-connection* sql))
+  ([sql] (prepare-statement sql *current-connection*))
+  ([sql conn]
+   (.prepareStatement conn sql)))
 
 (def open-connections (counter [(str *ns*) "redshift-connections" "open-connections"]))
 
@@ -131,6 +132,24 @@
 
 (defn drop-table-stmt [table]
   (prepare-statement (format "DROP TABLE %s" table)))
+
+(defn select-stl-load-errors-stmt [files]
+  (let [file-str (s/join "' ,'" files)]
+    (format "select * from stl_load_errors where query in (select query from (select max(query) as query, filename from stl_load_errors where filename in ('%s') group by filename));" file-str)))
+
+(defn get-stl-load-errors [conn files]
+  (let [ps (.prepareStatement conn (select-stl-load-errors-stmt files))
+        rs (.executeQuery ps)
+        results (loop [results []]
+                  (if (.next rs)
+                    (recur (conj results {:filename (s/trim (.getString rs "filename"))
+                                          :line-number (.getInt rs "line_number")
+                                          :colname (s/trim (.getString rs "colname"))
+                                          :err-reason (s/trim (.getString rs "err_reason"))}))
+                    results))]
+    (.close rs)
+    (.close ps)
+    results))
 
 (defn- aws-censor
   [s]
@@ -222,9 +241,19 @@
 (defn load-table
   "kicks off any loads based on :strategy, also will replace any {{ENV_VAR}}s found in :table :schema or :jdbc-url with the values from those env vars"
   [redshift-manifest-url {strategy :strategy :as table-manifest}]
-  (let [env-table-manifest (reduce (fn [m k] (update m k (fn [v] (util/replace-with-env-vars v))) ) table-manifest [:table :schema :jdbc-url :username :password])]
+  (let [env-table-manifest (reduce (fn [m k] (update m k (fn [v] (util/replace-with-env-vars v)))) table-manifest [:table :schema :jdbc-url :username :password])]
     (case (keyword strategy)
       :merge (merge-table redshift-manifest-url env-table-manifest)
       :replace (replace-table redshift-manifest-url env-table-manifest)
       :add (add-table redshift-manifest-url env-table-manifest)
       :append (append-table redshift-manifest-url env-table-manifest))))
+
+(defn get-stl-errors
+  [table-manifest files]
+  (let [env-table-manifest (reduce (fn [m k] (update m k (fn [v] (util/replace-with-env-vars v)))) table-manifest [:table :schema :jdbc-url :username :password])
+        {:keys [jdbc-url username password]} env-table-manifest
+        conn (connection jdbc-url username password)
+        results (get-stl-load-errors conn files)]
+    (when-not (.isClosed conn)
+              (.close conn))
+    results))
