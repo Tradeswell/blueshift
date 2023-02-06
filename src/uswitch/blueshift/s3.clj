@@ -113,7 +113,11 @@
               (do
                 (info "Watcher triggering import" (:table manifest))
                 (debug "Triggering load:" load)
-                {:state :load, :table-manifest manifest, :files (map :key data-files)})
+                (let [all-files (map :key data-files)
+                      files (if (= "merge" (:strategy manifest))
+                              [(first all-files)]
+                              all-files)]
+                  {:state :load, :table-manifest manifest, :files files}))
               {:state :scan, :pause? true})))
         {:state :scan, :pause? true}))
     (catch clojure.lang.ExceptionInfo e
