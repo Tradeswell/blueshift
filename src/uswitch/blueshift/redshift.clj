@@ -110,11 +110,15 @@
   [target-table staging-table keys]
   (prepare-statement (delete-target-query target-table staging-table keys)))
 
-(defn staging-select-statement [{:keys [staging-select] :as table-manifest} staging-table]
+(defn staging-select-statement [{:keys [columns staging-select]} staging-table]
   (cond
-    (string? staging-select)     (s/replace staging-select #"\{\{table\}\}" staging-table)
-    (= :distinct staging-select) (format "SELECT DISTINCT * FROM %s" staging-table)
-    :default                     (format "SELECT * FROM %s" staging-table)))
+    (string? staging-select)          (s/replace staging-select #"\{\{table\}\}" staging-table)
+    (= :distinct staging-select)      (format "SELECT DISTINCT * FROM %s" staging-table)
+    (= :distinct-hash staging-select) (let [cols (->> columns
+                                                      (remove #{"hash"})
+                                                      (s/join ","))]
+                                        (format "SELECT %s, max(hash) FROM %s group by %s" cols staging-table cols))
+    :else                              (format "SELECT * FROM %s" staging-table)))
 
 (defn insert-from-staging-stmt [target-table staging-table table-manifest]
   (let [select-statement (staging-select-statement table-manifest staging-table)]
@@ -255,5 +259,5 @@
         conn (connection jdbc-url username password)
         results (get-stl-load-errors conn files)]
     (when-not (.isClosed conn)
-              (.close conn))
+      (.close conn))
     results))
