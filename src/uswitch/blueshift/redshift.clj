@@ -94,7 +94,7 @@
 
 (defn delete-join-query
   [target-table staging-table keys]
-  (let [where (s/join " AND " (for [pk keys] (str target-table "." pk "=" staging-table "." pk)))]
+  (let [where (s/join " AND " (for [pk keys] (str "(" target-table "." pk "=" staging-table "." pk " OR (" target-table "." pk " IS NULL AND " staging-table "." pk " IS NULL))")))]
     (format "DELETE FROM %s USING %s WHERE %s" target-table staging-table where)))
 
 (defn delete-target-query
