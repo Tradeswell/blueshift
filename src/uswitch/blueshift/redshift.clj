@@ -93,22 +93,23 @@
   (format "DELETE FROM %s WHERE %s IN (SELECT %s FROM %s)" target-table key key staging-table))
 
 (defn delete-join-query
-  [target-table staging-table keys]
-  (let [where (s/join " AND " (for [pk keys] (str "(" target-table "." pk "=" staging-table "." pk " OR (" target-table "." pk " IS NULL AND " staging-table "." pk " IS NULL))")))]
-    (format "DELETE FROM %s USING %s WHERE %s" target-table staging-table where)))
+  [target-table staging-table keys pk-nulls]
+  (let [pk-where (if (empty? pk-nulls) "" (str " AND " (s/join " AND " (for [pk pk-nulls] (str "(" target-table "." pk "=" staging-table "." pk " OR (" target-table "." pk " IS NULL AND " staging-table "." pk " IS NULL))")))))
+        where (s/join " AND " (for [pk keys] (str target-table "." pk "=" staging-table "." pk)))]
+    (format "DELETE FROM %s USING %s WHERE %s%s" target-table staging-table where pk-where)))
 
 (defn delete-target-query
   "Attempts to optimise delete strategy based on keys arity. With single primary keys
    its significantly faster to delete."
-  [target-table staging-table keys]
+  [target-table staging-table keys pk-nulls]
   (cond (= 1 (count keys)) (delete-in-query target-table staging-table (first keys))
-        :default           (delete-join-query target-table staging-table keys)))
+        :default           (delete-join-query target-table staging-table keys pk-nulls)))
 
 (defn delete-target-stmt
   "Deletes rows, with the same primary key value(s), from target-table that will be
    overwritten by values in staging-table."
-  [target-table staging-table keys]
-  (prepare-statement (delete-target-query target-table staging-table keys)))
+  [target-table staging-table keys pk-nulls]
+  (prepare-statement (delete-target-query target-table staging-table keys pk-nulls)))
 
 (defn staging-select-statement [{:keys [staging-select] :as table-manifest} staging-table]
   (cond
@@ -196,7 +197,7 @@
                                                      :millis    timeout-millis})))
               :else (recur (rest statements)))))))
 
-(defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
+(defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns pk-nulls strategy execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")]
     (mark! redshift-imports)
@@ -204,7 +205,7 @@
       (execute execute-opts
                (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
-               (delete-target-stmt target-table staging-table pk-columns)
+               (delete-target-stmt target-table staging-table pk-columns pk-nulls)
                (insert-from-staging-stmt target-table staging-table table-manifest)
                (drop-table-stmt staging-table)))))
 

@@ -21,7 +21,7 @@
 
 (add-encoder java.time.Instant encode-str)
 
-(defrecord Manifest [table pk-columns columns jdbc-url username password add-status options data-pattern strategy staging-select])
+(defrecord Manifest [table pk-columns columns jdbc-url username password add-status options data-pattern strategy staging-select pk-nulls])
 
 (defn delete-object
   [bucket key]
@@ -39,6 +39,7 @@
 (def ManifestSchema {:table          s/Str
                      :schema         (s/maybe s/Str)
                      :pk-columns     [s/Str]
+                     :pk-nulls       (s/maybe [s/Str])
                      :columns        [s/Str]
                      :jdbc-url       s/Str
                      :username       s/Str
@@ -181,7 +182,6 @@
       (catch Exception e
         (warn "Couldn't delete" key "  - ignoring"))))
   {:state :scan, :pause? true})
-
 
 (defn- create-stl-load-error-msg
   [{:keys [err-reason colname filename line-number]} dest-bucket-key]
