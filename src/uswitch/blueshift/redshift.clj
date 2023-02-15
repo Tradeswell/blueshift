@@ -93,9 +93,10 @@
   (format "DELETE FROM %s WHERE %s IN (SELECT %s FROM %s)" target-table key key staging-table))
 
 (defn delete-join-query
-  [target-table staging-table keys pk-nulls]
+  [target-table staging-table pk-columns pk-nulls]
   (let [pk-where (if (empty? pk-nulls) "" (str " AND " (s/join " AND " (for [pk pk-nulls] (str "(" target-table "." pk "=" staging-table "." pk " OR (" target-table "." pk " IS NULL AND " staging-table "." pk " IS NULL))")))))
-        where (s/join " AND " (for [pk keys] (str target-table "." pk "=" staging-table "." pk)))]
+        pks (remove #(contains? (set pk-nulls) %) pk-columns)
+        where (s/join " AND " (for [pk pks] (str target-table "." pk "=" staging-table "." pk)))]
     (format "DELETE FROM %s USING %s WHERE %s%s" target-table staging-table where pk-where)))
 
 (defn delete-target-query
