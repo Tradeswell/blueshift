@@ -3,12 +3,12 @@
             [cheshire.generate :refer [add-encoder encode-str]]
             [com.stuartsierra.component :refer (Lifecycle system-map using start stop)]
             [clojure.string :as str]
-            [clojure.tools.logging :refer (info error warn debug errorf)]
+            [clojure.tools.logging :refer (info error warn debug)]
             [amazonica.aws.s3 :as s3]
             [clojure.set :refer (difference)]
             [clojure.core.async :refer (go-loop thread put! chan >!! <!! >! <! alts!! timeout close!)]
             [clojure.edn :as edn]
-            [uswitch.blueshift.util :refer (close-channels clear-keys)]
+            [uswitch.blueshift.util :refer (close-channels clear-keys log-error)]
             [schema.core :as s]
             [metrics.counters :refer (counter inc! dec!)]
             [metrics.timers :refer (timer time!)]
@@ -52,8 +52,9 @@
 
 (defn validate [manifest]
   (when-let [error-info (s/check ManifestSchema manifest)]
-    (error "Error validating: " manifest)
-    (throw (ex-info "Invalid manifest. Check map for more details." error-info))))
+    (let [ex (ex-info "Invalid manifest. Check map for more details." error-info)]
+      (log-error (str "Error validating manifest" ex))
+      (throw ex))))
 
 (defn list-all-objects
   [request]
@@ -122,13 +123,13 @@
               {:state :scan, :pause? true})))
         {:state :scan, :pause? true}))
     (catch clojure.lang.ExceptionInfo e
-      (error e "Error with manifest file")
+      (log-error (str "Error with manifest file: "  e))
       {:state :scan, :pause? true})
     (catch ConnectionPoolTimeoutException e
       (warn e "Connection timed out. Will re-try.")
       {:state :scan, :pause? true})
     (catch Exception e
-      (error e "Failed reading content of" (str bucket "/" directory))
+      (log-error (str "Failed reading content of: " (str bucket "/" directory) " Exception: " e))
       {:state :scan, :pause? true})))
 
 (def importing-files (counter [(str *ns*) "importing-files" "files"]))
@@ -153,8 +154,8 @@
          {:state :delete
           :files files}
          (catch java.sql.SQLException e
-           (error e "Error loading into" (:table table-manifest))
-           (error (:table table-manifest) "Redshift manifest content:" redshift-manifest)
+           (log-error (str "Error loading into: " (:table table-manifest) " Exception: " e))
+           (log-error (str (:table table-manifest) "Redshift manifest content for previous error: " redshift-manifest))
            (delete-object bucket key)
            (when (:add-status table-manifest)
              (sql/update-files-status files "failed"))
@@ -163,8 +164,8 @@
             :pause? true})
          (catch Exception e
            (if-let [m (ex-data e)]
-             (error e "Failed to load files to table" (:table table-manifest) ": " (pr-str m))
-             (error e "Failed to load files to table" (:table table-manifest) "from manifest" url))
+             (log-error (str "Failed to load files to table" (:table table-manifest) m))
+             (log-error (str "Failed to load files to table" (:table table-manifest) "from manifest: " url " Exception: " e)))
            (delete-object bucket key)
            (when (:add-status table-manifest)
              (sql/update-files-status files "failed"))
@@ -305,7 +306,7 @@
             (filter #(re-matches key-pattern %))
             (set))
        (catch Exception e
-         (errorf e "Error checking for matching object keys in \"%s\"" bucket)
+         (log-error (str "Error checking for matching object keys in: " bucket " Exception: " e))
          #{})))
 
 (defrecord BucketWatcher [bucket key-pattern poll-interval-seconds]
