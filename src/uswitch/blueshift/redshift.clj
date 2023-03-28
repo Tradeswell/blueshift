@@ -89,8 +89,8 @@
 (defn truncate-table-stmt [target-table]
   (prepare-statement (format "truncate table %s" target-table)))
 
-(defn delete-null-hash-query [target-table staging-table data-sources]
-  (let [ds-str (if data-sources (str "and " target-table ".data_source in ('" (s/join "', '" data-sources) "')") "")]
+(defn delete-null-hash-query [target-table staging-table delete-null-hash-merge-data-sources]
+  (let [ds-str (if delete-null-hash-merge-data-sources (str "and " target-table ".data_source in ('" (s/join "', '" delete-null-hash-merge-data-sources) "')") "")]
     (format (str "delete from %s using %s staging "
                  "where " target-table ".report_date = staging.report_date "
                  "and " target-table ".data_source = staging.data_source "
@@ -100,8 +100,8 @@
 (defn delete-null-hash
   "deletes from target table the rows that have matching report_date, data_source
    partner_company_ids that have null hashes"
-  [target-table staging-table data-sources]
-  (prepare-statement (delete-null-hash-query target-table staging-table data-sources)))
+  [target-table staging-table delete-null-hash-merge-data-sources]
+  (prepare-statement (delete-null-hash-query target-table staging-table delete-null-hash-merge-data-sources)))
 
 (defn delete-in-query [target-table staging-table key]
   (format "DELETE FROM %s WHERE %s IN (SELECT %s FROM %s)" target-table key key staging-table))
@@ -224,7 +224,7 @@
                (insert-from-staging-stmt target-table staging-table table-manifest)
                (drop-table-stmt staging-table)))))
 
-(defn delete-null-hash-merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns data-sources pk-nulls execute-opts] :as table-manifest}]
+(defn delete-null-hash-merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns delete-null-hash-merge-data-sources pk-nulls execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")]
     (mark! redshift-imports)
@@ -232,7 +232,7 @@
       (execute execute-opts
                (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
-               (delete-null-hash target-table staging-table data-sources)
+               (delete-null-hash target-table staging-table delete-null-hash-merge-data-sources)
                (delete-target-stmt target-table staging-table pk-columns pk-nulls)
                (insert-from-staging-stmt target-table staging-table table-manifest)
                (drop-table-stmt staging-table)))))
