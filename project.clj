@@ -1,4 +1,4 @@
-(defproject blueshift "0.1.19-SNAPSHOT"
+(defproject blueshift "0.1.20-SNAPSHOT"
   :description "Automate importing S3 data into Amazon Redshift"
   :url "https://github.com/uswitch/blueshift"
   :license {:name "Eclipse Public License"

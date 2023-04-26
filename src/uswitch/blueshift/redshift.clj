@@ -151,9 +151,9 @@
 
 (defn merge-from-staging-stmt [target-table staging-table full-columns pk-columns pk-nulls]
   (let [pks (remove #(contains? (set pk-nulls) %) pk-columns)
-        pks-no-nulls-stmt (s/join " AND " (for [pk pks] (str target-table "." pk " = " staging-table "." pk)))
-        pk-null-stmt (if (empty? pk-nulls) "" (s/join "" (for [pk pk-nulls] (str " and (" (str target-table "." pk " = " staging-table "." pk)
-                                                                                 " or (" target-table "." pk " IS NULL AND " staging-table "." pk " IS NULL))"))))
+        pks-no-nulls-stmt (if (empty? pks) "" (s/join " AND " (for [pk pks] (str target-table "." pk " = " staging-table "." pk))))
+        pk-null-stmt (if (empty? pk-nulls) "" (s/join "" (for [pk pk-nulls] (str (if (empty? pks) "" " and ")
+                                                                                 (str "COALESCE(" target-table "." pk ", '') = COALESCE(" staging-table "." pk ", '')")))))
         upsert-stmt (s/join ", " (for [c full-columns] (str c " = " (if (= c "update_ts") "getdate()" (str staging-table "." c)))))
         insert-stmt (s/join ", " (for [c full-columns] (if (= c "update_ts") "getdate()" (str staging-table "." c))))]
     (prepare-statement (format "MERGE INTO %s USING %s ON %s %s WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT VALUES (%s)"
