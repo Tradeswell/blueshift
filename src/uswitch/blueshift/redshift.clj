@@ -136,6 +136,29 @@
   (let [select-statement (staging-select-statement table-manifest staging-table)]
     (prepare-statement (format "INSERT INTO %s %s" target-table select-statement))))
 
+(defn create-row-nums-table-stmt [row-nums-table staging-table]
+  (prepare-statement (format "create temporary table %s as select row_number() over (partition by 1) as row_num, target.* from %s as target"
+                             row-nums-table staging-table)))
+
+(defn delete-from-row-nums-stmt [row-nums-table pk-columns]
+  (let [pk-stmt (s/join ", " pk-columns)]
+    (prepare-statement (format "DELETE FROM %s WHERE row_num NOT IN (SELECT MAX(row_num) FROM %s GROUP BY %s)"
+                               row-nums-table row-nums-table pk-stmt))))
+
+(defn drop-row-nums-column-stmt [row-nums-table]
+  (prepare-statement (format "ALTER TABLE %s drop COLUMN row_num"
+                             row-nums-table)))
+
+(defn merge-from-staging-stmt [target-table staging-table full-columns pk-columns pk-nulls]
+  (let [pks (remove #(contains? (set pk-nulls) %) pk-columns)
+        pks-no-nulls-stmt (s/join " AND " (for [pk pks] (str target-table "." pk " = " staging-table "." pk)))
+        pk-null-stmt (if (empty? pk-nulls) "" (s/join "" (for [pk pk-nulls] (str " and (" (str target-table "." pk " = " staging-table "." pk)
+                                                                                 " or (" target-table "." pk " IS NULL AND " staging-table "." pk " IS NULL))"))))
+        upsert-stmt (s/join ", " (for [c full-columns] (str c " = " (if (= c "update_ts") "getdate()" (str staging-table "." c)))))
+        insert-stmt (s/join ", " (for [c full-columns] (if (= c "update_ts") "getdate()" (str staging-table "." c))))]
+    (prepare-statement (format "MERGE INTO %s USING %s ON %s %s WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT VALUES (%s)"
+                               target-table staging-table pks-no-nulls-stmt pk-null-stmt upsert-stmt insert-stmt))))
+
 (defn append-from-staging-stmt [target-table staging-table keys]
   (let [join-columns (s/join " AND " (map #(str "s." % " = t." %) keys))
         where-clauses (s/join " AND " (map #(str "t." % " IS NULL") keys))]
@@ -212,30 +235,38 @@
                                                      :millis    timeout-millis})))
               :else (recur (rest statements)))))))
 
-(defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns pk-nulls strategy execute-opts] :as table-manifest}]
+(defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
-        staging-table (str table "_staging")]
+        staging-table (str table "_staging")
+        row-nums-table (str table "_rnums")]
     (mark! redshift-imports)
     (with-connection jdbc-url username password
       (execute execute-opts
                (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
-               (delete-target-stmt target-table staging-table pk-columns pk-nulls)
-               (insert-from-staging-stmt target-table staging-table table-manifest)
-               (drop-table-stmt staging-table)))))
+               (create-row-nums-table-stmt row-nums-table staging-table)
+               (delete-from-row-nums-stmt row-nums-table pk-columns)
+               (drop-row-nums-column-stmt row-nums-table)
+               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls)
+               (drop-table-stmt staging-table)
+               (drop-table-stmt row-nums-table)))))
 
-(defn delete-null-hash-merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns delete-null-hash-merge-data-sources pk-nulls execute-opts] :as table-manifest}]
+(defn delete-null-hash-merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls delete-null-hash-merge-data-sources execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
-        staging-table (str table "_staging")]
+        staging-table (str table "_staging")
+        row-nums-table (str table "_rnums")]
     (mark! redshift-imports)
     (with-connection jdbc-url username password
       (execute execute-opts
                (create-staging-table-stmt target-table staging-table)
                (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
                (delete-null-hash target-table staging-table delete-null-hash-merge-data-sources)
-               (delete-target-stmt target-table staging-table pk-columns pk-nulls)
-               (insert-from-staging-stmt target-table staging-table table-manifest)
-               (drop-table-stmt staging-table)))))
+               (create-row-nums-table-stmt row-nums-table staging-table)
+               (delete-from-row-nums-stmt row-nums-table pk-columns)
+               (drop-row-nums-column-stmt row-nums-table)
+               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls)
+               (drop-table-stmt staging-table)
+               (drop-table-stmt row-nums-table)))))
 
 (defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))]
@@ -285,5 +316,5 @@
         conn (connection jdbc-url username password)
         results (get-stl-load-errors conn files)]
     (when-not (.isClosed conn)
-              (.close conn))
+      (.close conn))
     results))
