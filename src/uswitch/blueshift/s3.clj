@@ -21,7 +21,7 @@
 
 (add-encoder java.time.Instant encode-str)
 
-(defrecord Manifest [table pk-columns columns jdbc-url username password add-status options data-pattern strategy staging-select pk-nulls delete-null-hash-merge-data-sources])
+(defrecord Manifest [table pk-columns columns full-columns jdbc-url username password add-status options data-pattern strategy staging-select pk-nulls delete-null-hash-merge-data-sources])
 
 (defn delete-object
   [bucket key]
@@ -41,6 +41,7 @@
                      :pk-columns     [s/Str]
                      :pk-nulls       (s/maybe [s/Str])
                      :columns        [s/Str]
+                     :full-columns   (s/maybe [s/Str])
                      :jdbc-url       s/Str
                      :username       s/Str
                      :password       s/Str
@@ -116,12 +117,8 @@
               (do
                 (info "Watcher triggering import" (:table manifest))
                 (debug "Triggering load:" load)
-                (let [all-files (map :key data-files)
-                      files (if (or (= "merge" (:strategy manifest))
-                                    (= "delete-null-hash-merge" (:strategy manifest)))
-                              [(first all-files)]
-                              all-files)]
-                  {:state :load, :table-manifest manifest, :files files}))
+                (let [all-files (map :key data-files)]
+                  {:state :load, :table-manifest manifest, :files all-files}))
               {:state :scan, :pause? true})))
         {:state :scan, :pause? true}))
     (catch clojure.lang.ExceptionInfo e
