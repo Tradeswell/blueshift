@@ -103,6 +103,21 @@
   [target-table staging-table delete-null-hash-merge-data-sources]
   (prepare-statement (delete-null-hash-query target-table staging-table delete-null-hash-merge-data-sources)))
 
+
+(defn delete-null-hash-customer-query [target-table staging-table delete-null-hash-merge-data-sources]
+  (let [ds-str (if delete-null-hash-merge-data-sources (str "and " target-table ".data_source in ('" (s/join "', '" delete-null-hash-merge-data-sources) "')") "")]
+    (format (str "delete from %s using %s staging "
+                 "where " target-table ".partner_order_id = staging.partner_order_id "
+                 "and " target-table ".data_source = staging.data_source "
+                 "and " target-table ".partner_company_id = staging.partner_company_id "
+                 "and " target-table ".hash is null %s") target-table staging-table ds-str)))
+
+(defn delete-null-hash-customer
+  "deletes from target table the rows that have matching report_date, data_source
+   partner_company_ids that have null hashes"
+  [target-table staging-table delete-null-hash-merge-data-sources]
+  (prepare-statement (delete-null-hash-customer-query target-table staging-table delete-null-hash-merge-data-sources)))
+
 (defn delete-in-query [target-table staging-table key]
   (format "DELETE FROM %s WHERE %s IN (SELECT %s FROM %s)" target-table key key staging-table))
 
@@ -268,6 +283,23 @@
                (drop-table-stmt staging-table)
                (drop-table-stmt row-nums-table)))))
 
+(defn delete-null-hash-merge-customer-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls delete-null-hash-merge-data-sources execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))
+        staging-table (str table "_staging")
+        row-nums-table (str table "_rnums")]
+    (mark! redshift-imports)
+    (with-connection jdbc-url username password
+      (execute execute-opts
+               (create-staging-table-stmt target-table staging-table)
+               (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
+               (delete-null-hash-customer target-table staging-table delete-null-hash-merge-data-sources)
+               (create-row-nums-table-stmt row-nums-table staging-table)
+               (delete-from-row-nums-stmt row-nums-table pk-columns)
+               (drop-row-nums-column-stmt row-nums-table)
+               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls)
+               (drop-table-stmt staging-table)
+               (drop-table-stmt row-nums-table)))))
+
 (defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))]
     (mark! redshift-imports)
@@ -305,6 +337,7 @@
     (case (keyword strategy)
       :merge (merge-table redshift-manifest-url env-table-manifest)
       :delete-null-hash-merge (delete-null-hash-merge-table redshift-manifest-url env-table-manifest)
+      :delete-null-hash-merge-customer (delete-null-hash-merge-customer-table redshift-manifest-url env-table-manifest)
       :replace (replace-table redshift-manifest-url env-table-manifest)
       :add (add-table redshift-manifest-url env-table-manifest)
       :append (append-table redshift-manifest-url env-table-manifest))))
