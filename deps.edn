@@ -24,4 +24,12 @@
   refactor-nrepl/refactor-nrepl {:mvn/version "3.5.2"},
   cider/cider-nrepl {:mvn/version "0.28.5"},
 
-  com.tradeswell/clostache {:local/root "./clostache"}}}
+  com.tradeswell/clostache {:local/root "./clostache"}}
+
+ :aliases
+ {:build {:deps       {io.github.seancorfield/build-clj
+                       {:git/tag   "v0.8.2" :git/sha "0ffdb4c"
+                        ;; since we're building an app uberjar, we do not
+                        ;; need deps-deploy for clojars.org deployment:
+                        :deps/root "slim"}}
+          :ns-default build}}}
