@@ -1,0 +1,3 @@
+[submodule "clostache"]
+	path = clostache
+	url = git@github.com:Tradeswell/clostache.git
