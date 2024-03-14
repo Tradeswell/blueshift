@@ -92,7 +92,7 @@
 (defn delete-null-hash-query [target-table staging-table delete-null-hash-merge-data-sources]
   (let [ds-str (if delete-null-hash-merge-data-sources (str "and " target-table ".data_source in ('" (s/join "', '" delete-null-hash-merge-data-sources) "')") "")]
     (format (str "delete from %s using "
-                 "(select report_date, data_source, staging.partner_company_id from %s group by 1,2,3) staging "
+                 "(select report_date, data_source, partner_company_id from %s group by 1,2,3) staging "
                  "where " target-table ".report_date = staging.report_date "
                  "and " target-table ".data_source = staging.data_source "
                  "and " target-table ".partner_company_id = staging.partner_company_id "
@@ -108,7 +108,7 @@
 (defn delete-null-hash-customer-query [target-table staging-table delete-null-hash-merge-data-sources]
   (let [ds-str (if delete-null-hash-merge-data-sources (str "and " target-table ".data_source in ('" (s/join "', '" delete-null-hash-merge-data-sources) "')") "")]
     (format (str "delete from %s using "
-                 "(select partner_order_id, data_source, staging.partner_company_id from %s group by 1,2,3) staging "
+                 "(select partner_order_id, data_source, partner_company_id from %s group by 1,2,3) staging "
                  "where " target-table ".partner_order_id = staging.partner_order_id "
                  "and " target-table ".data_source = staging.data_source "
                  "and " target-table ".partner_company_id = staging.partner_company_id "
