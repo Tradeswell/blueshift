@@ -6,7 +6,8 @@
             [clojure.core.async :refer (chan <!! >!! close! thread timeout alts!!)]
             [metrics.meters :refer (mark! meter)]
             [metrics.counters :refer (inc! dec! counter)]
-            [uswitch.blueshift.util :as util])
+            [uswitch.blueshift.util :as util]
+            [clojure.string :as str])
   (:import [java.util UUID]
            [java.io ByteArrayInputStream]
            [com.amazonaws.auth DefaultAWSCredentialsProviderChain]
@@ -105,7 +106,6 @@
   [target-table staging-table delete-null-hash-merge-data-sources]
   (prepare-statement (delete-null-hash-query target-table staging-table delete-null-hash-merge-data-sources)))
 
-
 (defn delete-null-hash-customer-query [target-table staging-table delete-null-hash-merge-data-sources]
   (let [ds-str (if delete-null-hash-merge-data-sources (str "and " target-table ".data_source in ('" (s/join "', '" delete-null-hash-merge-data-sources) "')") "")]
     (format (str "delete from %s using "
@@ -168,11 +168,23 @@
   (prepare-statement (format "ALTER TABLE %s drop COLUMN row_num"
                              row-nums-table)))
 
-(defn merge-from-staging-stmt [target-table staging-table full-columns pk-columns pk-nulls]
+(defn get-pk-null-value
+  [table-metadata pk]
+  (let [pk-null (str/lower-case pk)
+        col-type (get table-metadata pk-null)]
+    (cond
+      (or (str/includes? col-type "int")
+          (str/includes? col-type "numeric")) 0
+      (or (str/includes? col-type "timestamp")
+          (str/includes? col-type "date")) "'2025-01-01'"
+      :else "''")))
+
+(defn merge-from-staging-stmt [target-table staging-table full-columns pk-columns pk-nulls table-metadata]
   (let [pks (remove #(contains? (set pk-nulls) %) pk-columns)
         pks-no-nulls-stmt (if (empty? pks) "" (s/join " AND " (for [pk pks] (str target-table "." pk " = " staging-table "." pk))))
         pk-null-stmt (if (empty? pk-nulls) "" (s/join "" (for [pk pk-nulls] (str (if (empty? pks) "" " and ")
-                                                                                 (str "COALESCE(" target-table "." pk ", '') = COALESCE(" staging-table "." pk ", '')")))))
+                                                                                 "COALESCE(" target-table "." pk ", " (get-pk-null-value table-metadata pk) ") = "
+                                                                                 "COALESCE(" staging-table "." pk ", " (get-pk-null-value table-metadata pk) ")"))))
         upsert-stmt (s/join ", " (for [c full-columns] (str c " = " (if (= c "update_ts") "getdate()" (str staging-table "." c)))))
         insert-stmt (s/join ", " (for [c full-columns] (if (= c "update_ts") "getdate()" (str staging-table "." c))))]
     (prepare-statement (format "MERGE INTO %s USING %s ON %s %s WHEN MATCHED THEN UPDATE SET %s WHEN NOT MATCHED THEN INSERT VALUES (%s)"
@@ -254,10 +266,30 @@
                                                      :millis    timeout-millis})))
               :else (recur (rest statements)))))))
 
+(defn execute-meta-stmt [conn schema stmt]
+  (.execute (.createStatement conn) (str "SET search_path to " schema))
+  (let [ps (.prepareStatement conn stmt)
+        rs (.executeQuery ps)
+        results (loop [results {}]
+                  (if (.next rs)
+                    (recur (assoc results (.getString rs "column") (.getString rs "type")))
+                    results))]
+    (.close rs)
+    (.close ps)
+    results))
+
+(defn get-table-metadata
+  [jdbc-url schema username password table]
+  (let [conn (connection jdbc-url username password)
+        meta-stmt (str "select * from pg_table_def where tablename = '" table "'")
+        table-metadata (execute-meta-stmt conn schema meta-stmt)]
+    table-metadata))
+
 (defn merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")
-        row-nums-table (str table "_rnums")]
+        row-nums-table (str table "_rnums")
+        table-metadata (if (empty? pk-nulls) {} (get-table-metadata jdbc-url schema username password table))]
     (mark! redshift-imports)
     (with-connection jdbc-url username password
       (execute execute-opts
@@ -266,14 +298,15 @@
                (create-row-nums-table-stmt row-nums-table staging-table)
                (delete-from-row-nums-stmt row-nums-table pk-columns)
                (drop-row-nums-column-stmt row-nums-table)
-               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls)
+               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls table-metadata)
                (drop-table-stmt staging-table)
                (drop-table-stmt row-nums-table)))))
 
 (defn delete-null-hash-merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls delete-null-hash-merge-data-sources execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")
-        row-nums-table (str table "_rnums")]
+        row-nums-table (str table "_rnums")
+        table-metadata (if (empty? pk-nulls) {} (get-table-metadata jdbc-url schema username password table))]
     (mark! redshift-imports)
     (with-connection jdbc-url username password
       (execute execute-opts
@@ -283,14 +316,15 @@
                (create-row-nums-table-stmt row-nums-table staging-table)
                (delete-from-row-nums-stmt row-nums-table pk-columns)
                (drop-row-nums-column-stmt row-nums-table)
-               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls)
+               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls table-metadata)
                (drop-table-stmt staging-table)
                (drop-table-stmt row-nums-table)))))
 
 (defn delete-null-hash-merge-customer-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls delete-null-hash-merge-data-sources execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")
-        row-nums-table (str table "_rnums")]
+        row-nums-table (str table "_rnums")
+        table-metadata (if (empty? pk-nulls) {} (get-table-metadata jdbc-url schema username password table))]
     (mark! redshift-imports)
     (with-connection jdbc-url username password
       (execute execute-opts
@@ -300,11 +334,11 @@
                (create-row-nums-table-stmt row-nums-table staging-table)
                (delete-from-row-nums-stmt row-nums-table pk-columns)
                (drop-row-nums-column-stmt row-nums-table)
-               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls)
+               (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls table-metadata)
                (drop-table-stmt staging-table)
                (drop-table-stmt row-nums-table)))))
 
-(defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
+(defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url username password _ _ execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))]
     (mark! redshift-imports)
     (with-connection jdbc-url username password
@@ -312,7 +346,7 @@
                (truncate-table-stmt target-table)
                (copy-from-s3-stmt target-table redshift-manifest-url table-manifest)))))
 
-(defn append-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
+(defn append-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns _ execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")]
     (mark! redshift-imports)
@@ -323,7 +357,7 @@
                (append-from-staging-stmt target-table staging-table pk-columns)
                (drop-table-stmt staging-table)))))
 
-(defn add-table [redshift-manifest-url {:keys [table schema jdbc-url username password pk-columns strategy execute-opts] :as table-manifest}]
+(defn add-table [redshift-manifest-url {:keys [table schema jdbc-url username password _ _ execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))
         staging-table (str table "_staging")]
     (mark! redshift-imports)
@@ -355,3 +389,23 @@
     (when-not (.isClosed conn)
       (.close conn))
     results))
+
+(comment
+
+  (do
+    (def host "redshift-cluster-dev-v3.cpda9uxkfwgr.us-east-1.redshift.amazonaws.com")
+    (def schema "tradeswell_data_warehouse_dev")
+    (def port 5439)
+    (def password "")
+    (def user "tradeswell")
+    (def db "tradeswell")
+    (def jdbc-url (str "jdbc:postgresql://" host ":" port "/" db "?tcpKeepAlive=true"))
+   ;;
+    )
+
+  (def table-metadata (get-table-metadata jdbc-url schema user password "digital_shelf_keyword_product_history"))
+
+  (get-pk-null-value table-metadata "presence_index")
+
+  ;;
+  )
