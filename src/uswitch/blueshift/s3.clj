@@ -103,6 +103,22 @@
             (assoc-if-nil :strategy "merge")
             (update-in [:data-pattern] re-pattern))))))
 
+(def default-max-batch-files 1000)
+
+(defn parse-max-batch-files
+  "Turns an env var string into a batch cap, falling back to the default
+   for nil, blank, non-numeric, or non-positive input."
+  [s]
+  (let [n (when-not (str/blank? s) (try (Long/parseLong (str/trim s)) (catch NumberFormatException _ nil)))]
+    (if (and n (pos? n))
+      n
+      (do
+        (when-not (str/blank? s)
+          (warn "Invalid BLUESHIFT_MAX_BATCH_FILES value:" s "- using default" default-max-batch-files))
+        default-max-batch-files))))
+
+(def max-batch-files (parse-max-batch-files (System/getenv "BLUESHIFT_MAX_BATCH_FILES")))
+
 (defn- step-scan
   [bucket directory]
   (try
@@ -117,7 +133,7 @@
               (do
                 (info "Watcher triggering import" (:table manifest))
                 (debug "Triggering load:" load)
-                (let [all-files (map :key data-files)]
+                (let [all-files (vec (take max-batch-files (map :key data-files)))]
                   {:state :load, :table-manifest manifest, :files all-files}))
               {:state :scan, :pause? true})))
         {:state :scan, :pause? true}))
