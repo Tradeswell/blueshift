@@ -109,13 +109,14 @@
   "Turns an env var string into a batch cap, falling back to the default
    for nil, blank, non-numeric, or non-positive input."
   [s]
-  (let [n (when-not (str/blank? s) (try (Long/parseLong (str/trim s)) (catch NumberFormatException _ nil)))]
-    (if (and n (pos? n))
-      n
-      (do
-        (when-not (str/blank? s)
-          (warn "Invalid BLUESHIFT_MAX_BATCH_FILES value:" s "- using default" default-max-batch-files))
-        default-max-batch-files))))
+  (if (str/blank? s)
+    default-max-batch-files
+    (let [n (try (Long/parseLong (str/trim s)) (catch NumberFormatException _ nil))]
+      (if (and n (pos? n))
+        n
+        (do
+          (warn "Invalid BLUESHIFT_MAX_BATCH_FILES value:" s "- using default" default-max-batch-files)
+          default-max-batch-files)))))
 
 (def max-batch-files (parse-max-batch-files (System/getenv "BLUESHIFT_MAX_BATCH_FILES")))
 
