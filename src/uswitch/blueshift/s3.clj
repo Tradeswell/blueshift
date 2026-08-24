@@ -106,8 +106,9 @@
 (def default-max-batch-files 1000)
 
 (defn parse-max-batch-files
-  "Turns an env var string into a batch cap, falling back to the default
-   for nil, blank, non-numeric, or non-positive input."
+  "Turns an env var string into a batch cap. Falls back to the default
+   silently for nil or blank input, and with a warning for a non-numeric
+   or non-positive value."
   [s]
   (if (str/blank? s)
     default-max-batch-files
