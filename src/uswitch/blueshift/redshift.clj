@@ -122,6 +122,46 @@
   [target-table staging-table delete-null-hash-merge-data-sources]
   (prepare-statement (delete-null-hash-customer-query target-table staging-table delete-null-hash-merge-data-sources)))
 
+(defn delete-null-marketplace-query
+  "Deletes target rows whose partner_marketplace_id is still NULL, for the
+   partitions present in staging. Returns nil when no data source is armed."
+  [target-table staging-table delete-null-marketplace-data-sources]
+  (when (seq delete-null-marketplace-data-sources)
+    (let [ds-str (str "and " target-table ".data_source in ('" (s/join "', '" delete-null-marketplace-data-sources) "')")]
+      (format (str "delete from %s using "
+                   "(select report_date, data_source, data_type, partner_company_id from %s group by 1,2,3,4) staging "
+                   "where " target-table ".report_date = staging.report_date "
+                   "and " target-table ".data_source = staging.data_source "
+                   "and " target-table ".data_type = staging.data_type "
+                   "and " target-table ".partner_company_id = staging.partner_company_id "
+                   "and " target-table ".partner_marketplace_id is null %s") target-table staging-table ds-str))))
+
+(defn delete-null-marketplace
+  "Prepared statement, or nil when no data source is armed."
+  [target-table staging-table delete-null-marketplace-data-sources]
+  (when-let [query (delete-null-marketplace-query target-table staging-table delete-null-marketplace-data-sources)]
+    (prepare-statement query)))
+
+(defn delete-null-marketplace-customer-query
+  "delete-null-marketplace-query for tw_retail_partner_customer_orders, which has
+   no report_date and keys on partner_order_id instead. Same gate."
+  [target-table staging-table delete-null-marketplace-data-sources]
+  (when (seq delete-null-marketplace-data-sources)
+    (let [ds-str (str "and " target-table ".data_source in ('" (s/join "', '" delete-null-marketplace-data-sources) "')")]
+      (format (str "delete from %s using "
+                   "(select partner_order_id, data_source, data_type, partner_company_id from %s group by 1,2,3,4) staging "
+                   "where " target-table ".partner_order_id = staging.partner_order_id "
+                   "and " target-table ".data_source = staging.data_source "
+                   "and " target-table ".data_type = staging.data_type "
+                   "and " target-table ".partner_company_id = staging.partner_company_id "
+                   "and " target-table ".partner_marketplace_id is null %s") target-table staging-table ds-str))))
+
+(defn delete-null-marketplace-customer
+  "Prepared statement, or nil when no data source is armed."
+  [target-table staging-table delete-null-marketplace-data-sources]
+  (when-let [query (delete-null-marketplace-customer-query target-table staging-table delete-null-marketplace-data-sources)]
+    (prepare-statement query)))
+
 (defn delete-in-query [target-table staging-table key]
   (format "DELETE FROM %s WHERE %s IN (SELECT %s FROM %s)" target-table key key staging-table))
 
@@ -178,6 +218,45 @@
       (or (str/includes? col-type "timestamp")
           (str/includes? col-type "date")) "'2025-01-01'"
       :else "''")))
+
+(defn- pk-match-clause
+  "Compares one pk column the way merge-from-staging-stmt does, so the delete and
+   the merge match the same rows. :pk-nulls columns use COALESCE on both sides."
+  [target-table staged pk-nulls table-metadata column]
+  (if (contains? (set pk-nulls) column)
+    (let [fill (get-pk-null-value table-metadata column)]
+      (str "COALESCE(" target-table "." column ", " fill ") = COALESCE(" staged "." column ", " fill ")"))
+    (str target-table "." column " = " staged "." column)))
+
+(defn delete-null-marketplace-pk-query
+  "Deletes each incoming row's stale NULL-marketplace twin, keyed on the manifest's
+   own :pk-columns because these tables share no common key. Filters by data_source
+   only when the table has that column. Returns nil when no data source is armed."
+  [target-table staging-table pk-columns pk-nulls table-metadata delete-null-marketplace-data-sources]
+  (when (seq delete-null-marketplace-data-sources)
+    (let [keys   (remove #{"partner_marketplace_id"} pk-columns)
+          on     (s/join " and " (map #(pk-match-clause target-table "staging" pk-nulls table-metadata %) keys))
+          ds-str (if (contains? table-metadata "data_source")
+                   (str " and " target-table ".data_source in ('"
+                        (s/join "', '" delete-null-marketplace-data-sources) "')")
+                   "")]
+      (format (str "delete from %s using "
+                   "(select %s from %s group by %s) staging "
+                   "where %s "
+                   "and " target-table ".partner_marketplace_id is null%s")
+              target-table
+              (s/join ", " keys)
+              staging-table
+              (s/join "," (range 1 (inc (count keys))))
+              on
+              ds-str))))
+
+(defn delete-null-marketplace-pk
+  "Prepared statement, or nil when no data source is armed."
+  [target-table staging-table pk-columns pk-nulls table-metadata delete-null-marketplace-data-sources]
+  (when-let [query (delete-null-marketplace-pk-query target-table staging-table pk-columns pk-nulls
+                                                     table-metadata delete-null-marketplace-data-sources)]
+    (prepare-statement query)))
 
 (defn merge-from-staging-stmt [target-table staging-table full-columns pk-columns pk-nulls table-metadata]
   (let [pks (remove #(contains? (set pk-nulls) %) pk-columns)
@@ -338,6 +417,68 @@
                (drop-table-stmt staging-table)
                (drop-table-stmt row-nums-table)))))
 
+(defn delete-null-marketplace-merge-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls delete-null-marketplace-data-sources execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))
+        staging-table (str table "_staging")
+        row-nums-table (str table "_rnums")
+        table-metadata (if (empty? pk-nulls) {} (get-table-metadata jdbc-url schema username password table))]
+    (mark! redshift-imports)
+    (with-connection jdbc-url username password
+      ;; execute stops at the first nil statement, so the unarmed delete has to be
+      ;; removed from the list rather than passed through as nil.
+      (apply execute execute-opts
+             (remove nil?
+                     [(create-staging-table-stmt target-table staging-table)
+                      (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
+                      (delete-null-marketplace target-table staging-table delete-null-marketplace-data-sources)
+                      (create-row-nums-table-stmt row-nums-table staging-table)
+                      (delete-from-row-nums-stmt row-nums-table pk-columns)
+                      (drop-row-nums-column-stmt row-nums-table)
+                      (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls table-metadata)
+                      (drop-table-stmt staging-table)
+                      (drop-table-stmt row-nums-table)])))))
+
+(defn delete-null-marketplace-merge-customer-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls delete-null-marketplace-data-sources execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))
+        staging-table (str table "_staging")
+        row-nums-table (str table "_rnums")
+        table-metadata (if (empty? pk-nulls) {} (get-table-metadata jdbc-url schema username password table))]
+    (mark! redshift-imports)
+    (with-connection jdbc-url username password
+      (apply execute execute-opts
+             (remove nil?
+                     [(create-staging-table-stmt target-table staging-table)
+                      (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
+                      (delete-null-marketplace-customer target-table staging-table delete-null-marketplace-data-sources)
+                      (create-row-nums-table-stmt row-nums-table staging-table)
+                      (delete-from-row-nums-stmt row-nums-table pk-columns)
+                      (drop-row-nums-column-stmt row-nums-table)
+                      (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls table-metadata)
+                      (drop-table-stmt staging-table)
+                      (drop-table-stmt row-nums-table)])))))
+
+(defn delete-null-marketplace-merge-pk-table [redshift-manifest-url {:keys [table schema jdbc-url username password full-columns pk-columns pk-nulls delete-null-marketplace-data-sources execute-opts] :as table-manifest}]
+  (let [target-table (if (s/blank? schema) table (str schema "." table))
+        staging-table (str table "_staging")
+        row-nums-table (str table "_rnums")
+        ;; Always fetched, unlike the siblings: needed for the COALESCE fills and to
+        ;; tell whether the table has a data_source column.
+        table-metadata (get-table-metadata jdbc-url schema username password table)]
+    (mark! redshift-imports)
+    (with-connection jdbc-url username password
+      (apply execute execute-opts
+             (remove nil?
+                     [(create-staging-table-stmt target-table staging-table)
+                      (copy-from-s3-stmt staging-table redshift-manifest-url table-manifest)
+                      (delete-null-marketplace-pk target-table staging-table pk-columns pk-nulls
+                                                  table-metadata delete-null-marketplace-data-sources)
+                      (create-row-nums-table-stmt row-nums-table staging-table)
+                      (delete-from-row-nums-stmt row-nums-table pk-columns)
+                      (drop-row-nums-column-stmt row-nums-table)
+                      (merge-from-staging-stmt target-table row-nums-table full-columns pk-columns pk-nulls table-metadata)
+                      (drop-table-stmt staging-table)
+                      (drop-table-stmt row-nums-table)])))))
+
 (defn replace-table [redshift-manifest-url {:keys [table schema jdbc-url username password _ _ execute-opts] :as table-manifest}]
   (let [target-table (if (s/blank? schema) table (str schema "." table))]
     (mark! redshift-imports)
@@ -376,6 +517,9 @@
       :merge (merge-table redshift-manifest-url env-table-manifest)
       :delete-null-hash-merge (delete-null-hash-merge-table redshift-manifest-url env-table-manifest)
       :delete-null-hash-merge-customer (delete-null-hash-merge-customer-table redshift-manifest-url env-table-manifest)
+      :delete-null-marketplace-merge (delete-null-marketplace-merge-table redshift-manifest-url env-table-manifest)
+      :delete-null-marketplace-merge-customer (delete-null-marketplace-merge-customer-table redshift-manifest-url env-table-manifest)
+      :delete-null-marketplace-merge-pk (delete-null-marketplace-merge-pk-table redshift-manifest-url env-table-manifest)
       :replace (replace-table redshift-manifest-url env-table-manifest)
       :add (add-table redshift-manifest-url env-table-manifest)
       :append (append-table redshift-manifest-url env-table-manifest))))
