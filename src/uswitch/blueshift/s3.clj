@@ -21,7 +21,7 @@
 
 (add-encoder java.time.Instant encode-str)
 
-(defrecord Manifest [table pk-columns columns full-columns jdbc-url username password add-status options data-pattern strategy staging-select pk-nulls delete-null-hash-merge-data-sources])
+(defrecord Manifest [table pk-columns columns full-columns jdbc-url username password add-status options data-pattern strategy staging-select pk-nulls delete-null-hash-merge-data-sources delete-null-marketplace-data-sources])
 
 (defn delete-object
   [bucket key]
@@ -48,6 +48,7 @@
                      :add-status     (s/maybe s/Bool)
                      :strategy       s/Str
                      :delete-null-hash-merge-data-sources   (s/maybe [s/Str])
+                     :delete-null-marketplace-data-sources  (s/maybe [s/Str])
                      :options        s/Any
                      :staging-select (s/maybe (s/either s/Str s/Keyword))
                      :data-pattern   s/Regex})
