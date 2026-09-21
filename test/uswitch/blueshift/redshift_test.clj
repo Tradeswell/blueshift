@@ -7,54 +7,6 @@
 (def ^:private target "tradeswell_data_warehouse_dev.tw_marketing_partner_campaign_day")
 (def ^:private staging "tw_marketing_partner_campaign_day_staging")
 
-(deftest delete-null-marketplace-query-is-gated-on-the-source-list
-  (testing "no armed source produces no delete at all"
-    (are [sources] (nil? (redshift/delete-null-marketplace-query target staging sources))
-      nil
-      []
-      '()
-      #{}))
-
-  (testing "an absent manifest key reaches the query as nil, so it is also no delete"
-    (let [manifest (s3/map->Manifest {:table "tw_marketing_partner_campaign_day"})]
-      (is (contains? manifest :delete-null-marketplace-data-sources))
-      (is (nil? (:delete-null-marketplace-data-sources manifest)))
-      (is (nil? (redshift/delete-null-marketplace-query
-                 target staging (:delete-null-marketplace-data-sources manifest))))))
-
-  (testing "one armed source filters to that source"
-    (let [query (redshift/delete-null-marketplace-query target staging ["facebook_ads"])]
-      (is (s/includes? query (str "and " target ".partner_marketplace_id is null")))
-      (is (s/includes? query (str "and " target ".data_source in ('facebook_ads')")))))
-
-  (testing "several armed sources are quoted individually"
-    (is (s/includes? (redshift/delete-null-marketplace-query target staging ["facebook_ads" "google_ads"])
-                     (str "and " target ".data_source in ('facebook_ads', 'google_ads')")))))
-
-(deftest delete-null-marketplace-query-joins-staging-on-the-partition-columns
-  (let [query (redshift/delete-null-marketplace-query target staging ["facebook_ads"])]
-    (is (s/starts-with? query (format "delete from %s using " target)))
-    (is (s/includes? query (format "(select report_date, data_source, data_type, partner_company_id from %s group by 1,2,3,4) staging" staging)))
-    (are [column] (s/includes? query (str "and " target "." column " = staging." column))
-      "data_source"
-      "data_type"
-      "partner_company_id")
-    (is (s/includes? query (str "where " target ".report_date = staging.report_date")))))
-
-(deftest delete-null-marketplace-customer-query-keys-on-partner-order-id
-  (testing "the customer variant carries the same gate"
-    (are [sources] (nil? (redshift/delete-null-marketplace-customer-query target staging sources))
-      nil
-      []))
-
-  (let [query (redshift/delete-null-marketplace-customer-query target staging ["facebook_ads"])]
-    (testing "tw_retail_partner_customer_orders has no report_date"
-      (is (not (s/includes? query "report_date"))))
-    (is (s/includes? query (format "(select partner_order_id, data_source, data_type, partner_company_id from %s group by 1,2,3,4) staging" staging)))
-    (is (s/includes? query (str "where " target ".partner_order_id = staging.partner_order_id")))
-    (is (s/includes? query (str "and " target ".partner_marketplace_id is null")))
-    (is (s/includes? query (str "and " target ".data_source in ('facebook_ads')")))))
-
 (deftest manifests-validate-with-and-without-the-new-key
   (let [base {:table          "tw_marketing_partner_campaign_day"
               :schema         "tradeswell_data_warehouse_dev"
@@ -66,7 +18,7 @@
               :username       "tradeswell"
               :password       ""
               :add-status     nil
-              :strategy       "delete-null-marketplace-merge"
+              :strategy       "delete-null-marketplace-merge-pk"
               :options        []
               :staging-select nil
               :data-pattern   #".*\.gz"}]
@@ -74,14 +26,6 @@
       (is (nil? (s3/validate (s3/map->Manifest base)))))
     (testing "and an armed list is accepted"
       (is (nil? (s3/validate (s3/map->Manifest (assoc base :delete-null-marketplace-data-sources ["facebook_ads"]))))))))
-
-(deftest load-table-dispatches-the-new-strategies
-  (with-redefs [redshift/delete-null-marketplace-merge-table (fn [_ _] :merge-table)
-                redshift/delete-null-marketplace-merge-customer-table (fn [_ _] :customer-table)]
-    (are [strategy expected] (= expected (redshift/load-table "s3://bucket/x.manifest"
-                                                              {:table "t" :strategy strategy}))
-      "delete-null-marketplace-merge"          :merge-table
-      "delete-null-marketplace-merge-customer" :customer-table)))
 
 (def ^:private stub-connection
   (reify java.sql.Connection
@@ -124,39 +68,22 @@
       (table-fn "s3://bucket/x.manifest" table-manifest))
     @executed))
 
-(deftest an-unarmed-load-still-runs-every-other-statement
-  ;; execute stops at the first nil statement, so dropping the remove nil? would
-  ;; silently skip the merge and both drops on every unarmed table.
-  (let [without-delete [:create-staging :copy :create-row-nums :delete-row-nums
-                        :drop-row-num-column :merge [:drop "t_staging"] [:drop "t_rnums"]]]
-    (testing "no armed source: the delete is absent and nothing after it is lost"
-      (are [table-fn] (= without-delete (statements-for table-fn {:table "t" :pk-nulls []}))
-        redshift/delete-null-marketplace-merge-table
-        redshift/delete-null-marketplace-merge-customer-table))
-
-    ;; The marker and the index both matter: both builders emit
-    ;; "partner_marketplace_id is null", and a delete after the merge would undo it.
-    (testing "one armed source: the delete is inserted at index 2, from that fn's own builder"
-      (are [table-fn marker]
-           (let [statements (statements-for table-fn
-                                            {:table "t" :pk-nulls []
-                                             :delete-null-marketplace-data-sources ["facebook_ads"]})
-                 delete     (nth statements 2)]
-             (and (= 9 (count statements))
-                  (string? delete)
-                  (s/includes? delete "partner_marketplace_id is null")
-                  (s/includes? delete marker)
-                  (= without-delete (concat (take 2 statements) (drop 3 statements)))))
-        redshift/delete-null-marketplace-merge-table          "t.report_date = staging.report_date"
-        redshift/delete-null-marketplace-merge-customer-table "t.partner_order_id = staging.partner_order_id"))))
-
 (deftest delete-null-marketplace-pk-query-keys-on-the-manifests-own-columns
-  (testing "same gate as the other two variants"
+  (testing "no armed source produces no delete at all"
     (are [sources] (nil? (redshift/delete-null-marketplace-pk-query
                           target staging pk-columns pk-nulls pk-metadata sources))
       nil
       []
-      '()))
+      '()
+      #{}))
+
+  (testing "an absent manifest key reaches the query as nil, so it is also no delete"
+    (let [manifest (s3/map->Manifest {:table "tw_marketing_partner_campaign_day"})]
+      (is (contains? manifest :delete-null-marketplace-data-sources))
+      (is (nil? (:delete-null-marketplace-data-sources manifest)))
+      (is (nil? (redshift/delete-null-marketplace-pk-query
+                 target staging pk-columns pk-nulls pk-metadata
+                 (:delete-null-marketplace-data-sources manifest))))))
 
   (let [query (redshift/delete-null-marketplace-pk-query
                target staging pk-columns pk-nulls pk-metadata ["facebook_ads"])]
@@ -194,6 +121,24 @@
   (with-redefs [redshift/delete-null-marketplace-merge-pk-table (fn [_ _] :pk-table)]
     (is (= :pk-table (redshift/load-table "s3://bucket/x.manifest"
                                           {:table "t" :strategy "delete-null-marketplace-merge-pk"})))))
+
+(deftest load-table-names-the-unknown-strategy-and-the-table
+  ;; Without the default clause this is IllegalArgumentException "No matching
+  ;; clause: :delete-null-marketplace-merge", which names neither the table nor
+  ;; the schema. A manifest left on a removed strategy fails every load for that
+  ;; table, and the error lands in the loader's log, not in greeks.
+  (let [ex (try (redshift/load-table "s3://bucket/x.manifest"
+                                     {:table    "tw_retail_partner_customer_orders"
+                                      :schema   "tradeswell_data_warehouse_dev"
+                                      :strategy "delete-null-marketplace-merge"})
+                nil
+                (catch clojure.lang.ExceptionInfo e e))]
+    (is (some? ex))
+    (is (= "unknown load strategy" (ex-message ex)))
+    (is (= {:strategy "delete-null-marketplace-merge"
+            :table    "tw_retail_partner_customer_orders"
+            :schema   "tradeswell_data_warehouse_dev"}
+           (ex-data ex)))))
 
 (deftest pk-table-fn-puts-its-delete-at-index-2
   (let [without-delete [:create-staging :copy :create-row-nums :delete-row-nums
